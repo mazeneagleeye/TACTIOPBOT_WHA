@@ -33,7 +33,7 @@ function normalizeText(value) {
 }
 
 /**
- * Turn an incoming text message into a reply string. Always returns a non-empty string.
+ * Turn an incoming text message into a reply string or a clan mission image response.
  * @param {unknown} rawText
  * @param {object} [context] reserved for future use (e.g. { from }) - not stored or logged here.
  */

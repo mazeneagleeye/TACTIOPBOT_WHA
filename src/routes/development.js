@@ -59,6 +59,15 @@ function createDevelopmentRouter(adminNumbers) {
 
       logger.info('Simulated incoming message (mock mode)', { from: logger.maskId(from) });
       handleMessage(text, { from, adminNumbers }).then((reply) => {
+        if (reply && typeof reply === 'object' && typeof reply.text === 'string') {
+          return res.json({
+            from,
+            reply: reply.text,
+            imageGenerated: Buffer.isBuffer(reply.imageBuffer),
+            simulated: true,
+            sentToWhatsApp: false
+          });
+        }
         return res.json({ from, reply, simulated: true, sentToWhatsApp: false });
       }).catch((error) => {
         logger.error('Simulated message handler error', { error: error && error.message });

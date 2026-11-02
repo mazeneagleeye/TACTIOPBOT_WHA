@@ -13,9 +13,41 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(hashA, hashB);
 }
 
+async function deliverReply(client, to, reply) {
+  const text = typeof reply === 'string' ? reply : reply && reply.text;
+  if (typeof text !== 'string' || !text) {
+    logger.error('Message handler returned an invalid reply');
+    return;
+  }
+
+  if (reply && typeof reply === 'object' && Buffer.isBuffer(reply.imageBuffer)) {
+    try {
+      const upload = await client.uploadMedia(reply.imageBuffer, 'image/png');
+      if (upload && upload.accepted && typeof upload.mediaId === 'string' && upload.mediaId) {
+        const sentImage = await client.sendImage(to, upload.mediaId, text);
+        if (sentImage && sentImage.accepted) return;
+        logger.warn('Clan mission image was not accepted; sending text fallback', {
+          reason: sentImage && sentImage.reason ? sentImage.reason : 'image_send_failed'
+        });
+      } else {
+        logger.warn('Clan mission image upload failed; sending text fallback', {
+          reason: upload && upload.reason ? upload.reason : 'media_upload_failed'
+        });
+      }
+    } catch (error) {
+      logger.error('Clan mission image delivery failed; sending text fallback');
+    }
+  }
+
+  const result = await client.sendText(to, text);
+  if (!result.accepted) {
+    logger.warn('Reply was not accepted by the API', { reason: result.reason });
+  }
+}
+
 /**
  * @param {object} config  loadConfig() result
- * @param {{ sendText: Function }} client  WhatsApp client (real or mock)
+ * @param {{ sendText: Function, uploadMedia?: Function, sendImage?: Function }} client
  */
 function createWebhookRouter(config, client) {
   const router = express.Router();
@@ -104,14 +136,11 @@ function createWebhookRouter(config, client) {
       }
       // Message text is intentionally NOT logged or stored.
       const reply = await handleMessage(message.text, { from: message.from, adminNumbers: config.adminNumbers });
-      const result = await client.sendText(message.from, reply);
-      if (!result.accepted) {
-        logger.warn('Reply was not accepted by the API', { reason: result.reason });
-      }
+      await deliverReply(client, message.from, reply);
     }
   }
 
   return router;
 }
 
-module.exports = { createWebhookRouter };
+module.exports = { createWebhookRouter, deliverReply };

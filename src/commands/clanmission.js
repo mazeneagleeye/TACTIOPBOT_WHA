@@ -5,6 +5,7 @@
 // TACTIOPBOT_WHA.settings collection. No credentials are stored.
 
 const { getSession, setSession, clearSession } = require('../services/clanMissionSession');
+const logger = require('../utils/logger');
 const {
   listMissionChoices,
   resolveMissionChoice,
@@ -16,6 +17,11 @@ const {
 } = require('../services/clanMissionEngine');
 
 const TOTAL_SLOTS = 8;
+
+async function renderMissionImage(missions) {
+  const generateMissionImage = require('../../image/generateMissionImage');
+  return generateMissionImage(missions);
+}
 
 function formatModeList() {
   return PLACEMENT_MODES.map((m, i) => `${i + 1}. ${m.name}`).join('\n');
@@ -98,7 +104,7 @@ async function startSession(from) {
   return formatModePrompt();
 }
 
-async function processSessionResponse(from, session, userText) {
+async function processSessionResponse(from, session, userText, renderImage = renderMissionImage) {
   const trimmed = String(userText || '').trim();
   const lower = trimmed.toLowerCase();
 
@@ -124,7 +130,7 @@ async function processSessionResponse(from, session, userText) {
   if (session.state === 'awaiting_mission') {
     const slotIndex = session.currentSlot;
     if (slotIndex >= TOTAL_SLOTS) {
-      return await finalizeSession(from, session);
+      return await finalizeSession(from, session, renderImage);
     }
 
     const choice = resolveMissionChoice(trimmed);
@@ -136,7 +142,7 @@ async function processSessionResponse(from, session, userText) {
     session.currentSlot += 1;
 
     if (session.currentSlot >= TOTAL_SLOTS) {
-      return await finalizeSession(from, session);
+      return await finalizeSession(from, session, renderImage);
     }
 
     await setSession(from, session);
@@ -148,7 +154,7 @@ async function processSessionResponse(from, session, userText) {
   return 'Session state invalid. Send `!clanmission` to start again.';
 }
 
-async function finalizeSession(from, session) {
+async function finalizeSession(from, session, renderImage = renderMissionImage) {
   let slotResults;
   if (session.mode === 'smart_balance') {
     slotResults = assignSmartBalanceOperators(session.missions);
@@ -160,10 +166,37 @@ async function finalizeSession(from, session) {
 
   await clearSession(from);
 
+  let text;
   if (session.mode === 'gamechat') {
-    return formatGameChatResults(session, slotResults);
+    text = formatGameChatResults(session, slotResults);
+  } else {
+    text = formatResults(session, slotResults);
   }
-  return formatResults(session, slotResults);
+
+  const imageSlots = Array.from({ length: TOTAL_SLOTS }, (_, slotIndex) => {
+    const slot = slotResults[slotIndex];
+    if (!slot || !slot.mission) return { mission: 'Skip', operators: [] };
+    return {
+      mission: slot.mission,
+      operators: Array.isArray(slot.operators) ? slot.operators : []
+    };
+  });
+  return await createImageReply(text, imageSlots, renderImage);
+}
+
+async function createImageReply(text, imageSlots, renderImage = renderMissionImage) {
+  try {
+    const imageBuffer = await renderImage(imageSlots);
+    if (!Buffer.isBuffer(imageBuffer) || imageBuffer.length === 0) {
+      throw new Error('Image generator returned an invalid buffer');
+    }
+    return { text, imageBuffer };
+  } catch (error) {
+    logger.error('Clan mission image generation failed; returning text results', {
+      error: error && error.message ? error.message : 'unknown'
+    });
+    return text;
+  }
 }
 
 module.exports = {
@@ -184,5 +217,6 @@ module.exports = {
     }
     return await startSession(from);
   },
-  processSessionResponse
+  processSessionResponse,
+  _internal: { createImageReply, finalizeSession }
 };

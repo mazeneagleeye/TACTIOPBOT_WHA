@@ -46,6 +46,90 @@ test('success without a message id is not reported as accepted', async () => {
   assert.equal(result.accepted, false);
 });
 
+test('uploads PNG media to the WhatsApp media endpoint as multipart form data', async () => {
+  const calls = [];
+  const client = createWhatsAppClient(cloudConfig, async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse(200, { id: 'media.123' });
+  });
+
+  const result = await client.uploadMedia(Buffer.from('png-data'), 'image/png');
+  assert.equal(result.accepted, true);
+  assert.equal(result.mediaId, 'media.123');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://graph.facebook.com/v99.0/123456/media');
+  assert.equal(calls[0].options.method, 'POST');
+  assert.ok(calls[0].options.body instanceof FormData);
+  assert.equal(calls[0].options.body.get('messaging_product'), 'whatsapp');
+  assert.equal(calls[0].options.body.get('type'), 'image/png');
+  const file = calls[0].options.body.get('file');
+  assert.equal(file.name, 'clan_mission.png');
+  assert.equal(file.type, 'image/png');
+  assert.equal(Buffer.from(await file.arrayBuffer()).toString(), 'png-data');
+  assert.match(calls[0].options.headers.Authorization, /^Bearer /);
+});
+
+test('uploads media using the supplied supported MIME type', async () => {
+  let uploadedFile;
+  const client = createWhatsAppClient(cloudConfig, async (_url, options) => {
+    uploadedFile = options.body.get('file');
+    return jsonResponse(200, { id: 'media.jpeg' });
+  });
+
+  const result = await client.uploadMedia(Buffer.from('jpeg-data'), 'image/jpeg');
+  assert.equal(result.mediaId, 'media.jpeg');
+  assert.equal(uploadedFile.type, 'image/jpeg');
+  assert.equal(uploadedFile.name, 'clan_mission.jpg');
+});
+
+test('sends an uploaded image with its caption through the messages endpoint', async () => {
+  const calls = [];
+  const client = createWhatsAppClient(cloudConfig, async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse(200, { messages: [{ id: 'wamid.IMAGE' }] });
+  });
+
+  const result = await client.sendImage('15550001111', 'media.123', 'Clan Mission Results');
+  assert.deepEqual(result, { accepted: true, messageId: 'wamid.IMAGE', httpStatus: 200 });
+  assert.equal(calls[0].url, 'https://graph.facebook.com/v99.0/123456/messages');
+  assert.equal(calls[0].options.method, 'POST');
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(body.messaging_product, 'whatsapp');
+  assert.equal(body.to, '15550001111');
+  assert.equal(body.type, 'image');
+  assert.deepEqual(body.image, { id: 'media.123', caption: 'Clan Mission Results' });
+});
+
+test('invalid images and oversized captions are rejected without calling the network', async () => {
+  let calls = 0;
+  const client = createWhatsAppClient(cloudConfig, async () => {
+    calls += 1;
+    return jsonResponse(200, { id: 'media.123', messages: [{ id: 'wamid.IMAGE' }] });
+  });
+  assert.equal((await client.uploadMedia(Buffer.alloc(0))).reason, 'invalid_arguments');
+  assert.equal((await client.uploadMedia(Buffer.alloc(5 * 1024 * 1024 + 1))).reason, 'invalid_arguments');
+  assert.equal((await client.uploadMedia(Buffer.from('png-data'), 'image/gif')).reason, 'invalid_arguments');
+  assert.equal((await client.sendImage('', 'media.123')).reason, 'invalid_arguments');
+  assert.equal((await client.sendImage('1555', 'media.123', 'x'.repeat(1025))).reason, 'invalid_arguments');
+  assert.equal(calls, 0);
+});
+
+test('media upload and image send API errors are returned without retrying client errors', async () => {
+  const calls = [];
+  const client = createWhatsAppClient(cloudConfig, async (url, options) => {
+    calls.push({ url, options });
+    return jsonResponse(403, { error: { code: 10, message: 'Permission denied' } });
+  });
+
+  const upload = await client.uploadMedia(Buffer.from('png-data'));
+  const send = await client.sendImage('1555', 'media.123');
+  assert.equal(upload.accepted, false);
+  assert.equal(upload.reason, 'permission_denied');
+  assert.equal(send.accepted, false);
+  assert.equal(send.reason, 'permission_denied');
+  assert.equal(calls.length, 2);
+});
+
 test('invalid credentials are reported and not retried', async () => {
   let count = 0;
   const client = createWhatsAppClient(cloudConfig, async () => {
@@ -94,4 +178,6 @@ test('mock client never uses the network and reports not accepted', async () => 
   const result = await client.sendText('1555', 'hi');
   assert.equal(result.accepted, false);
   assert.equal(result.simulated, true);
+  assert.equal((await client.uploadMedia(Buffer.from('png'))).simulated, true);
+  assert.equal((await client.sendImage('1555', 'media')).simulated, true);
 });

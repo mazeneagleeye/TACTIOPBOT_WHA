@@ -2,6 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { handleMessage } = require('../src/services/messageHandler');
 
+test('message handler does not load the native image renderer before finalization', () => {
+  assert.equal(require.cache[require.resolve('../image/generateMissionImage')], undefined);
+  assert.equal(require.cache[require.resolve('@napi-rs/canvas')], undefined);
+});
+
 test('!help lists every command', async () => {
   const reply = await handleMessage('!help');
   for (const name of ['!help', '!clanmission', '!cancel', '!nextreset', '!reminderstatus', '!setnextreset', '!setcmnotif', '!editcmnotif', '!deletecmnotif', '!about']) {

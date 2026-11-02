@@ -14,6 +14,9 @@ const MAX_ATTEMPTS = 2; // 1 retry at most, and only for network errors / 5xx. N
 const RETRY_DELAY_MS = 500;
 const MAX_MESSAGE_LENGTH = 4096; // WhatsApp text body limit
 const MAX_TEMPLATE_PARAMETERS = 10;
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGE_CAPTION_LENGTH = 1024;
+const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png']);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -34,6 +37,53 @@ function describeFailure(httpStatus, apiError) {
   return 'request_rejected';
 }
 
+async function postWithRetry(fetchImpl, url, options, operation) {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let response;
+    try {
+      response = await fetchImpl(url, { ...options, signal: controller.signal });
+    } catch (error) {
+      const reason = error && error.name === 'AbortError' ? 'timeout' : 'network_error';
+      logger.error(`WhatsApp ${operation} failed (network)`, { reason, attempt });
+      if (attempt < MAX_ATTEMPTS) {
+        await sleep(RETRY_DELAY_MS);
+        continue;
+      }
+      return { failure: { accepted: false, reason } };
+    } finally {
+      clearTimeout(timer);
+    }
+
+    let data = null;
+    try {
+      data = await response.json();
+    } catch (error) {
+      data = null;
+    }
+
+    if (response.ok) return { response, data };
+
+    const apiError = data && data.error ? data.error : null;
+    const reason = describeFailure(response.status, apiError);
+    logger.error(`WhatsApp ${operation} API rejected the request`, {
+      reason,
+      httpStatus: response.status,
+      errorCode: apiError ? apiError.code : undefined,
+      errorSubcode: apiError ? apiError.error_subcode : undefined,
+      attempt
+    });
+
+    if (reason === 'meta_server_error' && attempt < MAX_ATTEMPTS) {
+      await sleep(RETRY_DELAY_MS);
+      continue;
+    }
+    return { failure: { accepted: false, reason, httpStatus: response.status } };
+  }
+  return { failure: { accepted: false, reason: 'unknown' } };
+}
+
 /**
  * Create a WhatsApp client.
  * @param {object} config result of loadConfig()
@@ -50,6 +100,19 @@ function createWhatsAppClient(config, fetchImpl = globalThis.fetch) {
         });
         return { accepted: false, simulated: true, reason: 'mock_mode' };
       },
+      async uploadMedia(imageBuffer) {
+        logger.info('Mock mode: media NOT uploaded to WhatsApp', {
+          bytes: Buffer.isBuffer(imageBuffer) ? imageBuffer.length : 0
+        });
+        return { accepted: false, simulated: true, reason: 'mock_mode' };
+      },
+      async sendImage(to, mediaId, caption) {
+        logger.info('Mock mode: image NOT sent to WhatsApp', {
+          to: logger.maskId(to),
+          hasCaption: typeof caption === 'string' && caption.length > 0
+        });
+        return { accepted: false, simulated: true, reason: 'mock_mode' };
+      },
       async sendTemplate(to, templateName, languageCode, parameters) {
         logger.info('Mock mode: template NOT sent to WhatsApp', {
           to: logger.maskId(to),
@@ -62,6 +125,7 @@ function createWhatsAppClient(config, fetchImpl = globalThis.fetch) {
   }
 
   const url = `${GRAPH_BASE_URL}/${config.apiVersion}/${config.phoneNumberId}/messages`;
+  const mediaUrl = `${GRAPH_BASE_URL}/${config.apiVersion}/${config.phoneNumberId}/media`;
 
   async function attemptSend(body) {
     const controller = new AbortController();
@@ -108,7 +172,7 @@ function createWhatsAppClient(config, fetchImpl = globalThis.fetch) {
           response = await attemptSend(body);
         } catch (error) {
           const reason = error && error.name === 'AbortError' ? 'timeout' : 'network_error';
-          logger.error('WhatsApp send failed (network)', { reason, attempt, error });
+          logger.error('WhatsApp send failed (network)', { reason, attempt });
           if (attempt < MAX_ATTEMPTS) {
             await sleep(RETRY_DELAY_MS);
             continue;
@@ -147,7 +211,6 @@ function createWhatsAppClient(config, fetchImpl = globalThis.fetch) {
           httpStatus: response.status,
           errorCode: apiError ? apiError.code : undefined,
           errorSubcode: apiError ? apiError.error_subcode : undefined,
-          errorMessage: apiError ? apiError.message : undefined,
           attempt
         });
 
@@ -160,6 +223,92 @@ function createWhatsAppClient(config, fetchImpl = globalThis.fetch) {
       }
       return { accepted: false, reason: 'unknown' };
       },
+
+    /**
+     * Upload a PNG image to the WhatsApp Cloud API.
+     * Never throws: returns { accepted, mediaId?, reason?, httpStatus? }.
+     */
+    async uploadMedia(imageBuffer, mimeType = 'image/png') {
+      if (
+        !Buffer.isBuffer(imageBuffer) ||
+        imageBuffer.length === 0 ||
+        imageBuffer.length > MAX_IMAGE_SIZE_BYTES ||
+        !IMAGE_MIME_TYPES.has(mimeType)
+      ) {
+        return { accepted: false, reason: 'invalid_arguments' };
+      }
+
+      const extension = mimeType === 'image/png' ? 'png' : 'jpg';
+      const form = new FormData();
+      form.append('messaging_product', 'whatsapp');
+      form.append('type', mimeType);
+      form.append('file', new Blob([imageBuffer], { type: mimeType }), `clan_mission.${extension}`);
+
+      const result = await postWithRetry(fetchImpl, mediaUrl, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${config.accessToken}` },
+        body: form
+      }, 'media upload');
+      if (result.failure) return result.failure;
+
+      const mediaId = result.data && result.data.id;
+      if (typeof mediaId !== 'string' || !mediaId) {
+        logger.warn('WhatsApp media upload succeeded without a media id; not treating as accepted', {
+          httpStatus: result.response.status
+        });
+        return { accepted: false, reason: 'no_media_id_in_response', httpStatus: result.response.status };
+      }
+      logger.info('WhatsApp API accepted media upload', { mediaId });
+      return { accepted: true, mediaId, httpStatus: result.response.status };
+    },
+
+    /**
+     * Send an already uploaded image. A caption is optional and limited to 1024 chars.
+     * Never throws: returns { accepted, messageId?, reason?, httpStatus? }.
+     */
+    async sendImage(to, mediaId, caption) {
+      if (
+        typeof to !== 'string' || !to ||
+        typeof mediaId !== 'string' || !mediaId ||
+        (caption !== undefined && (typeof caption !== 'string' || caption.length > MAX_IMAGE_CAPTION_LENGTH))
+      ) {
+        return { accepted: false, reason: 'invalid_arguments' };
+      }
+
+      const image = { id: mediaId };
+      if (caption) image.caption = caption;
+      const body = {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to,
+        type: 'image',
+        image
+      };
+      const result = await postWithRetry(fetchImpl, url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body)
+      }, 'image send');
+      if (result.failure) return result.failure;
+
+      const messageId = result.data && Array.isArray(result.data.messages) && result.data.messages[0]
+        ? result.data.messages[0].id
+        : null;
+      if (!messageId) {
+        logger.warn('WhatsApp image send succeeded without a message id; not treating as accepted', {
+          httpStatus: result.response.status
+        });
+        return { accepted: false, reason: 'no_message_id_in_response', httpStatus: result.response.status };
+      }
+      logger.info('WhatsApp API accepted image message (delivery not confirmed yet)', {
+        to: logger.maskId(to),
+        messageId
+      });
+      return { accepted: true, messageId, httpStatus: result.response.status };
+    },
 
     /**
      * Send a WhatsApp template message.
@@ -216,8 +365,7 @@ function createWhatsAppClient(config, fetchImpl = globalThis.fetch) {
           logger.error('WhatsApp template send failed (network)', {
             reason,
             attempt,
-            template: templateName,
-            error
+            template: templateName
           });
           if (attempt < MAX_ATTEMPTS) {
             await sleep(RETRY_DELAY_MS);
@@ -261,7 +409,6 @@ function createWhatsAppClient(config, fetchImpl = globalThis.fetch) {
           language: languageCode,
           errorCode: apiError ? apiError.code : undefined,
           errorSubcode: apiError ? apiError.error_subcode : undefined,
-          errorMessage: apiError ? apiError.message : undefined,
           attempt
         });
 

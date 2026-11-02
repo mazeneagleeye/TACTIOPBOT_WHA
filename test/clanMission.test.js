@@ -503,8 +503,9 @@ test('full flow: all 8 missions selected, default mode produces results', async 
 
   // Select missions 1-8: all Breach
   session = { state: 'awaiting_mission', mode: 'default', currentSlot: 0, missions: [], startedAt: Date.now() };
+  const renderImage = async () => Buffer.from('test-image');
   for (let i = 0; i < 8; i += 1) {
-    result = await processSessionResponse(from, session, '2'); // Breach
+    result = await processSessionResponse(from, session, '2', renderImage); // Breach
     session.missions[i] = 'Breach';
     session.currentSlot = i + 1;
     if (i < 7) {
@@ -513,12 +514,13 @@ test('full flow: all 8 missions selected, default mode produces results', async 
   }
 
   // After 8th mission, finalize
-  result = await processSessionResponse(from, { state: 'awaiting_mission', mode: 'default', currentSlot: 7, missions: ['Breach','Breach','Breach','Breach','Breach','Breach','Breach','Breach'], startedAt: Date.now() }, '2');
-  assert.ok(result.includes('Clan Mission Results'));
-  assert.ok(result.includes('Default'));
+  result = await processSessionResponse(from, { state: 'awaiting_mission', mode: 'default', currentSlot: 7, missions: ['Breach','Breach','Breach','Breach','Breach','Breach','Breach','Breach'], startedAt: Date.now() }, '2', renderImage);
+  assert.ok(result.text.includes('Clan Mission Results'));
+  assert.ok(Buffer.isBuffer(result.imageBuffer));
+  assert.ok(result.text.includes('Default'));
   // All 8 slots should be Breach
   for (let i = 0; i < 8; i += 1) {
-    assert.ok(result.includes(`M${i + 1} - Breach`));
+    assert.ok(result.text.includes(`M${i + 1} - Breach`));
   }
 });
 
@@ -539,17 +541,57 @@ test('game chat mode produces game chat formatted output', async () => {
 
   // Select all Breach
   session = { state: 'awaiting_mission', mode: 'gamechat', currentSlot: 0, missions: [], startedAt: Date.now() };
+  const renderImage = async () => Buffer.from('test-image');
   for (let i = 0; i < 8; i += 1) {
-    result = await processSessionResponse(from, session, '2'); // Breach
+    result = await processSessionResponse(from, session, '2', renderImage); // Breach
     session.missions[i] = 'Breach';
     session.currentSlot = i + 1;
   }
 
   // Finalize
-  result = await processSessionResponse(from, { state: 'awaiting_mission', mode: 'gamechat', currentSlot: 7, missions: ['Breach','Breach','Breach','Breach','Breach','Breach','Breach','Breach'], startedAt: Date.now() }, '2');
-  assert.ok(result.includes('Clan Mission — Game Chat'));
-  assert.ok(result.includes('[CLAN]'));
+  result = await processSessionResponse(from, { state: 'awaiting_mission', mode: 'gamechat', currentSlot: 7, missions: ['Breach','Breach','Breach','Breach','Breach','Breach','Breach','Breach'], startedAt: Date.now() }, '2', renderImage);
+  assert.ok(result.text.includes('Clan Mission — Game Chat'));
+  assert.ok(result.text.includes('[CLAN]'));
+  assert.ok(Buffer.isBuffer(result.imageBuffer));
   for (let i = 0; i < 8; i += 1) {
-    assert.ok(result.includes(`M${i + 1} Breach`));
+    assert.ok(result.text.includes(`M${i + 1} Breach`));
   }
+});
+
+test('finalized all-skip missions generate an eight-slot image payload with explicit Skip labels', async () => {
+  resetDBCache();
+  mockDb({ isConnected: () => false });
+  const { processSessionResponse } = require('../src/commands/clanmission');
+  let renderedSlots;
+  const result = await processSessionResponse(
+    '+15550001111',
+    {
+      state: 'awaiting_mission',
+      mode: 'default',
+      currentSlot: 7,
+      missions: Array(7).fill('Skip'),
+      startedAt: Date.now()
+    },
+    '1',
+    async (slots) => {
+      renderedSlots = slots;
+      return Buffer.from('png');
+    }
+  );
+
+  assert.equal(renderedSlots.length, 8);
+  assert.ok(renderedSlots.every((slot) => slot.mission === 'Skip' && slot.operators.length === 0));
+  assert.ok(Buffer.isBuffer(result.imageBuffer));
+  for (let slot = 1; slot <= 8; slot += 1) {
+    assert.ok(result.text.includes(`M${slot} - Skip`));
+  }
+});
+
+test('image generation failure preserves the clan mission text fallback', async () => {
+  const { _internal } = require('../src/commands/clanmission');
+  const text = '*Clan Mission Results*';
+  const result = await _internal.createImageReply(text, [], async () => {
+    throw new Error('test renderer failure');
+  });
+  assert.equal(result, text);
 });

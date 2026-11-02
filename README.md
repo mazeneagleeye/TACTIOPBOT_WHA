@@ -51,7 +51,7 @@ For local mock mode the defaults are fine, so you can leave every `WHATSAPP_*` v
 npm install
 ```
 
-This installs only `express` and `dotenv`.
+This installs the Express server, WhatsApp Cloud API dependencies, MongoDB driver, and the native-backed `@napi-rs/canvas` image renderer.
 
 ## 6. Start in mock mode
 
@@ -100,6 +100,12 @@ npm test
 ```
 
 The tests use Node's built-in test runner. They need no network, no Meta credentials, no WhatsApp number and no access to the Discord project.
+
+### Generate a clan mission PNG locally
+
+`image/generateMissionImage.js` accepts clan mission slot results in the WhatsApp format (`{ mission, operators: [{ op, value }] }`) and returns an approved vertical PNG with all eight slots. It uses `@napi-rs/canvas` and the operator portraits in `images/operators`.
+
+In Cloud mode, completed clan missions in any placement mode are uploaded through Meta's media endpoint and sent as an image with the existing text results as the caption. If rendering, upload, or image sending fails, the bot sends the same results as a plain text reply. Mock mode never uploads or sends media.
 
 ## 9. Create a Meta developer app and enable the WhatsApp Cloud API
 
@@ -168,6 +174,8 @@ This project is prepared for a generic Node.js host such as FadeHost. It has **n
 
 - `package.json` and `package-lock.json`
 - the `src/` folder
+- `image/` and `operatorImages.js`
+- `images/operators/` (the mission image portraits)
 - optional: `README.md`, `test/`
 
 **Do not upload:** `.env` (set variables in the dashboard instead), `node_modules` (let the host run `npm install`), or anything from the Discord project.
@@ -252,4 +260,3 @@ TACTIOPBOT_WHA/
     utils/logger.js     redacting JSON logger
   test/                 node:test tests
 ```
-
